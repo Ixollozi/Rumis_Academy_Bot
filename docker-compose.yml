@@ -1,0 +1,14 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rumis
+      POSTGRES_PASSWORD: rumis
+      POSTGRES_DB: rumis_bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - rumis_pg:/var/lib/postgresql/data
+
+volumes:
+  rumis_pg:

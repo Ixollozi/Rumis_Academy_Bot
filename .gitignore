@@ -1,0 +1,85 @@
+# Secrets / local env
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*_vps
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# Tests / coverage / typecheck
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Local databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Exports / generated files
+exports/
+*.xlsx
+*.xls
+*.csv
+!requirements.txt
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Cursor
+.cursor/
+
+# Docker local overrides
+docker-compose.override.yml
+
+# Alembic local runtime
+alembic/versions/__pycache__/
+
+# Local-only materials (do not commit)
+.stash/

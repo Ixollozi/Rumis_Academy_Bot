@@ -1,0 +1,1 @@
+"""Rumis Academy Mock Test Telegram bot."""
