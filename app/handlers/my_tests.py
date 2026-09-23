@@ -31,7 +31,7 @@ async def my_tests(message: Message, session: AsyncSession) -> None:
                 "my_test_item",
                 id=b.id,
                 exam_date=b.exam_date.exam_day.strftime("%d.%m.%Y"),
-                slot=b.slot.value,
+                slot=b.slot,
                 status=_status_label(user.lang, b.status),
                 price=format_price(b.price),
             )

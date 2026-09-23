@@ -8,6 +8,13 @@ id_rsa*
 id_ed25519*
 *_vps
 
+# Google / service accounts (never commit)
+*credentials*.json
+*service_account*.json
+google-sa*.json
+secrets/
+credentials/
+
 # Virtual environments
 .venv/
 venv/
@@ -26,7 +33,7 @@ dist/
 build/
 pip-wheel-metadata/
 
-# Tests / coverage / typecheck
+# Tests / coverage / typecheck / ad-hoc agent scripts
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -36,6 +43,12 @@ htmlcov/
 .nox/
 coverage.xml
 *.cover
+_smoke*.py
+_vps*.py
+_patch*.py
+_find*.py
+_az_*.py
+_az_*.db
 
 # Local databases
 *.db
@@ -72,7 +85,7 @@ $RECYCLE.BIN/
 *.swo
 *~
 
-# Cursor
+# Cursor (local rules / VPS notes — not for GitHub)
 .cursor/
 
 # Docker local overrides
@@ -81,5 +94,5 @@ docker-compose.override.yml
 # Alembic local runtime
 alembic/versions/__pycache__/
 
-# Local-only materials (do not commit)
+# Local-only materials (contract, notes — do not commit)
 .stash/

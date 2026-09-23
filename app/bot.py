@@ -17,6 +17,7 @@ from app.middlewares import (
     UpdateCallbackAnswerMiddleware,
 )
 from app.services.post_exam import start_scheduler
+from app.services import admin_access
 
 
 logging.basicConfig(
@@ -37,6 +38,9 @@ async def main() -> None:
     SessionLocal = get_session_factory()
     async with SessionLocal() as session:
         await repo.ensure_app_settings(session)
+        await repo.ensure_default_slots_for_all(session)
+        await repo.seed_examiners_from_contacts(session, settings.speaking_contact)
+        admins = await admin_access.sync_admins(session, settings.env_owner_ids)
         await session.commit()
 
     bot = Bot(
@@ -51,7 +55,7 @@ async def main() -> None:
     dp.include_router(setup_routers())
 
     start_scheduler(bot, settings)
-    logger.info("Bot starting (admins=%s)", settings.admin_id_list)
+    logger.info("Bot starting (admins=%s)", admins)
     await dp.start_polling(
         bot,
         drop_pending_updates=True,

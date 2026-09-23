@@ -1,5 +1,6 @@
 from aiogram import F, Router
-from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.callback_utils import safe_answer
@@ -14,6 +15,8 @@ from app.keyboards import (
     paid_kb,
 )
 from app.locales.i18n import t
+from app.services import sheets_sync
+from app.states import PaymentSG
 from app.utils import format_dmY, format_price, h
 
 router = Router(name="admin_applications")
@@ -70,7 +73,7 @@ async def apps_list(
             phone=b.user.phone or "—",
             username=b.user.username or "—",
             exam_date=b.exam_date.exam_day.strftime("%d.%m.%Y"),
-            slot=b.slot.value,
+            slot=b.slot,
             status=b.status.value,
             price=format_price(b.price),
         )
@@ -82,6 +85,14 @@ async def apps_list(
         elif b.status == BookingStatus.payment_review:
             kb = admin_payment_kb(user.lang, b.id)
         await callback.message.answer(card, reply_markup=kb)
+        if b.payment_file_id:
+            try:
+                if b.payment_file_type == "document":
+                    await callback.message.answer_document(b.payment_file_id)
+                else:
+                    await callback.message.answer_photo(b.payment_file_id)
+            except Exception:
+                pass
     await callback.message.answer("—", reply_markup=admin_menu_kb(user.lang))
     await callback.answer()
 
@@ -98,7 +109,9 @@ async def assign_price(
     if not booking:
         await callback.answer("not found", show_alert=True)
         return
-    booking = await repo.set_booking_price(booking=booking, session=session, price=int(price_s))
+    booking = await repo.set_booking_price(
+        booking=booking, session=session, price=int(price_s)
+    )
     lang = booking.user.lang
     await callback.message.edit_text(
         callback.message.text + f"\n\n→ price {price_s}"
@@ -138,7 +151,10 @@ async def reject_app(
 
 @router.callback_query(F.data.startswith("pay:done:"))
 async def user_paid(
-    callback: CallbackQuery, session: AsyncSession, settings: Settings
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
 ) -> None:
     booking_id = int(callback.data.split(":")[2])
     booking = await repo.get_booking(session, booking_id)
@@ -151,8 +167,52 @@ async def user_paid(
     ):
         await callback.answer("already processed", show_alert=True)
         return
-    booking = await repo.mark_payment_review(session, booking)
-    await callback.message.edit_text(t(booking.user.lang, "payment_sent"))
+    await state.set_state(PaymentSG.await_receipt)
+    await state.update_data(booking_id=booking_id)
+    await callback.message.edit_text(t(booking.user.lang, "ask_receipt"))
+    await callback.answer()
+
+
+async def _submit_receipt(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    file_id: str,
+    file_type: str,
+    booking_id: int | None = None,
+) -> None:
+    user = await repo.get_or_create_user(session, message.from_user.id)
+    if booking_id is None:
+        data = await state.get_data()
+        booking_id = int(data.get("booking_id") or 0)
+    booking = await repo.get_booking(session, booking_id) if booking_id else None
+    if not booking or booking.user.tg_id != message.from_user.id:
+        # try latest awaiting booking
+        bookings = await repo.list_user_bookings(session, user.id)
+        booking = next(
+            (
+                b
+                for b in bookings
+                if b.status == BookingStatus.awaiting_payment
+            ),
+            None,
+        )
+    if not booking or booking.status not in (
+        BookingStatus.awaiting_payment,
+        BookingStatus.payment_review,
+    ):
+        await message.answer(t(user.lang, "receipt_no_booking"))
+        await state.clear()
+        return
+
+    booking = await repo.mark_payment_review(
+        session, booking, file_id=file_id, file_type=file_type
+    )
+    await state.clear()
+    await message.answer(t(user.lang, "payment_sent"))
+
     card = t(
         "ru",
         "admin_app_card",
@@ -162,20 +222,60 @@ async def user_paid(
         phone=booking.user.phone or "—",
         username=booking.user.username or "—",
         exam_date=booking.exam_date.exam_day.strftime("%d.%m.%Y"),
-        slot=booking.slot.value,
+        slot=booking.slot,
         status=booking.status.value,
         price=format_price(booking.price),
     )
     for admin_id in settings.admin_id_list:
         try:
-            await callback.bot.send_message(
+            await message.bot.send_message(
                 admin_id,
                 f"{t('ru', 'payment_notify')}\n\n{card}",
                 reply_markup=admin_payment_kb("ru", booking.id),
             )
+            if file_type == "document":
+                await message.bot.send_document(admin_id, file_id)
+            else:
+                await message.bot.send_photo(admin_id, file_id)
         except Exception:
             pass
-    await callback.answer()
+
+
+@router.message(PaymentSG.await_receipt, F.photo)
+async def receipt_photo(
+    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    photo = message.photo[-1]
+    await _submit_receipt(
+        message,
+        state,
+        session,
+        settings,
+        file_id=photo.file_id,
+        file_type="photo",
+    )
+
+
+@router.message(PaymentSG.await_receipt, F.document)
+async def receipt_doc(
+    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    await _submit_receipt(
+        message,
+        state,
+        session,
+        settings,
+        file_id=message.document.file_id,
+        file_type="document",
+    )
+
+
+@router.message(PaymentSG.await_receipt)
+async def receipt_need_file(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    user = await repo.get_or_create_user(session, message.from_user.id)
+    await message.answer(t(user.lang, "ask_receipt"))
 
 
 @router.callback_query(F.data.startswith("adm:paid:"))
@@ -212,13 +312,19 @@ async def mark_paid(
             booking.user.lang,
             "payment_confirmed",
             exam_date=h(booking.exam_date.exam_day.strftime("%d.%m.%Y")),
-            slot=h(booking.slot.value),
+            slot=h(booking.slot),
             address=h(settings.center_address or "—"),
         ),
     )
     await callback.message.edit_text(
         (callback.message.text or "") + f"\n\n→ {t(admin.lang, 'admin_mark_paid')}"
     )
+    # Google Sheets sync (best-effort)
+    try:
+        await sheets_sync.on_booking_paid(session, booking, settings)
+    except Exception:
+        pass
+    await callback.answer("OK")
 
 
 @router.callback_query(F.data.startswith("adm:unpay:"))

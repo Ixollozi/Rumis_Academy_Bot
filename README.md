@@ -9,6 +9,7 @@
 - PostgreSQL + SQLAlchemy async
 - APScheduler (пост-экзамен через 2ч 50м)
 - openpyxl (выгрузка Excel)
+- опционально: Google Sheets (Students / Results / Session Log)
 
 ## Быстрый старт
 
@@ -73,20 +74,24 @@ python -m app.bot
 
 ## Админ-панель
 
-Кнопка «Админ-панель» (только `ADMIN_IDS`):
+Кнопка «Админ-панель» (только админы из БД / `ADMIN_IDS`):
 
 - даты Main Test + лимит (по умолчанию 10)
 - заявки (цена / оплата)
 - цены 75k / 150k
 - результаты
 - ручной пост-экзамен
+- уведомления (рассылка зарегистрированным / оплатившим)
+- **админы** — добавить / удалить по Telegram ID (системных из `.env` удалить нельзя)
 - выгрузка Excel
+
+`ADMIN_IDS` в `.env` — постоянные «владельцы» (не снимаются из панели). Остальных админов клиент крутит сам в боте.
 
 ## Чеклист приёмки
 
 1. Первый запуск: язык + телефон, без ФИО  
 2. Полный цикл записи на UZ / RU / EN  
-3. Админ-панель: даты, лимит, заявки, цены, оплата, результаты, пост-экзамен  
+3. Админ-панель: даты, лимит, заявки, цены, оплата, результаты, пост-экзамен, уведомления  
 4. Excel по полям ТЗ  
 5. Пост-экзамен авто 2:50 + ручная кнопка  
 6. Меню: Мои тесты, Результаты, Локация, Связаться  
@@ -96,12 +101,35 @@ python -m app.bot
 
 Click/Payme, база учеников, OCR чеков, SMS, Mini App, 1С/CRM.
 
-## Деплой на VPS
+## Деплой на VPS (только через Git)
 
-1. VPS (например [eskis.uz](https://eskis.uz))
-2. Python 3.11+, Docker или Postgres
-3. Скопировать проект, `.env`, `pip install -r requirements.txt`
-4. `python -m app.bot` (systemd / screen)
+Код на сервер **не копируем** (`scp`/`rsync` запрещены). Локаль и VPS = один GitHub-репозиторий.
+
+1. Локально: commit → `git push origin main`
+2. На VPS:
+
+```bash
+cd /opt/rumis-bot
+bash deploy/deploy.sh
+# или вручную:
+# git pull --ff-only origin main
+# .venv/bin/pip install -r requirements.txt
+# systemctl restart rumis-bot
+```
+
+Первичная установка (если каталога ещё нет):
+
+```bash
+git clone https://github.com/Ixollozi/Rumis_Academy_Bot.git /opt/rumis-bot
+cd /opt/rumis-bot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env   # заполнить секреты; .env в git не попадает
+# положить SQLite/Postgres URL в DATABASE_URL
+systemctl enable --now rumis-bot
+```
+
+Runtime **не в git**: `.env`, `*.db`, `.venv/`, `exports/`.
 
 Пример systemd:
 
@@ -114,6 +142,7 @@ After=network.target
 WorkingDirectory=/opt/rumis-bot
 ExecStart=/opt/rumis-bot/.venv/bin/python -m app.bot
 Restart=always
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
@@ -121,8 +150,13 @@ WantedBy=multi-user.target
 
 ## Инструкция администратору
 
-1. Добавьте даты Main Test  
+1. Добавьте даты Main Test и слоты  
 2. Назначьте цену заявке или отклоните  
-3. После «Я оплатил» — Оплачено / Отклонить  
-4. Опубликуйте результат  
-5. Excel — «Выгрузка Excel»  
+3. После «Я оплатил» + чек — Оплачено / Отклонить  
+4. Результаты: «Ожидают» → отправка; обработанные — в «Архив»  
+5. При необходимости — «Уведомления»  
+6. Excel — «Выгрузка Excel»  
+
+## Google Sheets (опционально)
+
+Нужны `GOOGLE_SHEETS_ID` + `GOOGLE_CREDENTIALS_JSON` (путь к JSON service account) и доступ «Редактор» на email из `client_email`. Без ключа синхронизация просто пропускается.

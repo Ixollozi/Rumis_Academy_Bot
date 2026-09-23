@@ -1,0 +1,3 @@
+# Keep shell scripts Unix on checkout (VPS)
+deploy/*.sh text eol=lf
+*.sh text eol=lf

@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.callback_utils import safe_answer
 from app.config import Settings
 from app.db import repo
-from app.db.models import SlotTime
 from app.keyboards import (
     admin_price_assign_kb,
     cancel_kb,
@@ -22,6 +21,12 @@ from app.states import BookingSG
 from app.utils import format_dmY, h, normalize_full_name, parse_dmY
 
 router = Router(name="booking")
+
+
+def _slot_from_cb(data: str) -> str:
+    # book:slot:10-00 → 10:00
+    raw = data.split(":", 2)[2]
+    return raw.replace("-", ":", 1)
 
 
 @router.message(F.text.in_(all_t("btn_book")))
@@ -124,7 +129,7 @@ async def cancel_booking_cb(
 
 @router.callback_query(BookingSG.exam_date, F.data.startswith("book:date:"))
 async def booking_pick_date(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
 ) -> None:
     user = await repo.get_or_create_user(session, callback.from_user.id)
     exam_date_id = int(callback.data.split(":")[2])
@@ -132,26 +137,38 @@ async def booking_pick_date(
     if not exam_date or not await repo.is_date_available(session, exam_date):
         await safe_answer(callback, t(user.lang, "no_dates"), show_alert=True)
         return
+    open_slots = await repo.list_open_slot_values(
+        session, exam_date, settings.timezone
+    )
+    if not open_slots:
+        await safe_answer(callback, t(user.lang, "no_slots"), show_alert=True)
+        return
     await state.update_data(exam_date_id=exam_date_id)
     await state.set_state(BookingSG.slot)
     await callback.message.edit_text(
-        t(user.lang, "choose_slot"), reply_markup=slots_kb(user.lang)
+        t(user.lang, "choose_slot"),
+        reply_markup=slots_kb(user.lang, open_slots),
     )
 
 
 @router.callback_query(BookingSG.slot, F.data.startswith("book:slot:"))
 async def booking_pick_slot(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
 ) -> None:
     user = await repo.get_or_create_user(session, callback.from_user.id)
-    slot_name = callback.data.split(":")[2]
-    slot = SlotTime[slot_name]
+    slot = _slot_from_cb(callback.data)
     data = await state.get_data()
     exam_date = await repo.get_exam_date(session, int(data["exam_date_id"]))
     if not exam_date:
         await safe_answer(callback, t(user.lang, "no_dates"), show_alert=True)
         return
-    await state.update_data(slot=slot.name)
+    open_slots = await repo.list_open_slot_values(
+        session, exam_date, settings.timezone
+    )
+    if slot not in open_slots:
+        await safe_answer(callback, t(user.lang, "no_slots"), show_alert=True)
+        return
+    await state.update_data(slot=slot)
     await state.set_state(BookingSG.confirm)
     text = t(
         user.lang,
@@ -159,7 +176,7 @@ async def booking_pick_slot(
         full_name=h(data["full_name"]),
         birth_date=h(format_dmY(date_cls.fromisoformat(data["birth_date"]))),
         exam_date=h(exam_date.exam_day.strftime("%d.%m.%Y")),
-        slot=h(slot.value),
+        slot=h(slot),
     )
     await callback.message.edit_text(text, reply_markup=confirm_kb(user.lang))
 
@@ -176,9 +193,17 @@ async def booking_confirm(
     )
     data = await state.get_data()
     exam_date = await repo.get_exam_date(session, int(data["exam_date_id"]))
+    slot = data["slot"]
     if not exam_date or not await repo.is_date_available(session, exam_date):
         await state.clear()
         await safe_answer(callback, t(user.lang, "no_dates"), show_alert=True)
+        return
+    open_slots = await repo.list_open_slot_values(
+        session, exam_date, settings.timezone
+    )
+    if slot not in open_slots:
+        await state.clear()
+        await safe_answer(callback, t(user.lang, "no_slots"), show_alert=True)
         return
 
     booking = await repo.create_booking(
@@ -187,7 +212,7 @@ async def booking_confirm(
         exam_date=exam_date,
         full_name_en=data["full_name"],
         birth_date=date_cls.fromisoformat(data["birth_date"]),
-        slot=SlotTime[data["slot"]],
+        slot=slot,
     )
     await state.clear()
     await callback.message.edit_text(t(user.lang, "booking_submitted"))
@@ -208,7 +233,7 @@ async def booking_confirm(
         phone=h(user.phone or "—"),
         username=h(user.username or "—"),
         exam_date=h(exam_date.exam_day.strftime("%d.%m.%Y")),
-        slot=h(booking.slot.value),
+        slot=h(booking.slot),
         status=h(booking.status.value),
         price="—",
     )

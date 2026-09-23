@@ -16,6 +16,14 @@ class BookingSG(StatesGroup):
 
 class AdminSG(StatesGroup):
     add_date = State()
+    pick_slots = State()
     set_limit = State()
     set_prices = State()
     set_result = State()
+    broadcast = State()
+    add_admin = State()
+    add_examiner = State()
+
+
+class PaymentSG(StatesGroup):
+    await_receipt = State()

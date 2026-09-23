@@ -5,7 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.db import repo
-from app.keyboards import admin_date_actions_kb, admin_dates_list_kb, admin_menu_kb
+from app.db.models import DEFAULT_SLOT_HOURS
+from app.keyboards import (
+    admin_date_actions_kb,
+    admin_dates_list_kb,
+    admin_menu_kb,
+    admin_slot_pick_kb,
+)
 from app.locales.i18n import t
 from app.states import AdminSG
 from app.utils import format_dmY, parse_dmY
@@ -15,6 +21,11 @@ router = Router(name="admin_dates")
 
 def _admin_ok(settings: Settings, user_id: int) -> bool:
     return settings.is_admin(user_id)
+
+
+async def _slot_selected(state: FSMContext) -> set[str]:
+    data = await state.get_data()
+    return set(data.get("selected_slots") or [])
 
 
 @router.callback_query(F.data == "adm:home")
@@ -69,16 +80,96 @@ async def admin_add_date(
         await message.answer(t(user.lang, "invalid_birth_date"))
         return
     row = await repo.create_exam_date(session, day, settings.default_date_limit)
-    await state.clear()
+    await state.set_state(AdminSG.pick_slots)
+    await state.update_data(
+        exam_date_id=row.id,
+        selected_slots=list(DEFAULT_SLOT_HOURS),
+    )
     await message.answer(
         t(
             user.lang,
-            "admin_date_added",
+            "admin_pick_slots",
             exam_date=format_dmY(row.exam_day),
-            limit=row.seat_limit,
+        ),
+        reply_markup=admin_slot_pick_kb(
+            user.lang, row.id, set(DEFAULT_SLOT_HOURS)
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:editslots:"))
+async def admin_edit_slots(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    if not _admin_ok(settings, callback.from_user.id):
+        await callback.answer("no", show_alert=True)
+        return
+    exam_date_id = int(callback.data.split(":")[2])
+    exam = await repo.get_exam_date(session, exam_date_id)
+    if not exam:
+        await callback.answer("not found", show_alert=True)
+        return
+    selected = {s.time_value for s in exam.slots} or set(DEFAULT_SLOT_HOURS)
+    user = await repo.get_or_create_user(session, callback.from_user.id)
+    await state.set_state(AdminSG.pick_slots)
+    await state.update_data(exam_date_id=exam_date_id, selected_slots=list(selected))
+    await callback.message.edit_text(
+        t(user.lang, "admin_pick_slots", exam_date=format_dmY(exam.exam_day)),
+        reply_markup=admin_slot_pick_kb(user.lang, exam_date_id, selected),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:slot:"))
+async def admin_toggle_slot(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    if not _admin_ok(settings, callback.from_user.id):
+        await callback.answer("no", show_alert=True)
+        return
+    # adm:slot:{id}:{HH-MM}
+    parts = callback.data.split(":")
+    exam_date_id = int(parts[2])
+    hour = parts[3].replace("-", ":", 1)
+    selected = await _slot_selected(state)
+    if hour in selected:
+        selected.discard(hour)
+    else:
+        selected.add(hour)
+    await state.update_data(selected_slots=list(selected))
+    user = await repo.get_or_create_user(session, callback.from_user.id)
+    await callback.message.edit_reply_markup(
+        reply_markup=admin_slot_pick_kb(user.lang, exam_date_id, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:slotsave:"))
+async def admin_save_slots(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+) -> None:
+    if not _admin_ok(settings, callback.from_user.id):
+        await callback.answer("no", show_alert=True)
+        return
+    exam_date_id = int(callback.data.split(":")[2])
+    selected = await _slot_selected(state)
+    user = await repo.get_or_create_user(session, callback.from_user.id)
+    if not selected:
+        await callback.answer(t(user.lang, "admin_slots_need_one"), show_alert=True)
+        return
+    exam = await repo.set_exam_date_slots(session, exam_date_id, list(selected))
+    await state.clear()
+    slots_txt = ", ".join(sorted(selected))
+    await callback.message.edit_text(
+        t(
+            user.lang,
+            "admin_slots_saved",
+            exam_date=format_dmY(exam.exam_day) if exam else "—",
+            slots=slots_txt,
         ),
         reply_markup=admin_menu_kb(user.lang),
     )
+    await callback.answer("OK")
 
 
 @router.callback_query(F.data.startswith("adm:date:") & ~F.data.endswith(":add"))
@@ -95,10 +186,12 @@ async def admin_date_detail(
         return
     paid = await repo.paid_count_for_date(session, exam.id)
     user = await repo.get_or_create_user(session, callback.from_user.id)
+    slot_vals = [s.time_value for s in exam.slots] or list(DEFAULT_SLOT_HOURS)
     text = (
         f"{exam.exam_day.strftime('%d.%m.%Y')}\n"
         f"Limit: {exam.seat_limit}\n"
         f"Paid: {paid}\n"
+        f"Slots: {', '.join(slot_vals)}\n"
         f"Closed: {exam.is_closed}"
     )
     await callback.message.edit_text(

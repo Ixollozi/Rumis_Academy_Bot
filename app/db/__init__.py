@@ -54,7 +54,9 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from app.db.models import Base
+    from app.db.migrate import upgrade_schema
 
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await upgrade_schema(engine)

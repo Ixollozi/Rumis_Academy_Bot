@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     default_date_limit: int = Field(default=10, alias="DEFAULT_DATE_LIMIT")
     timezone: str = Field(default="Asia/Tashkent", alias="TIMEZONE")
 
+    google_sheets_id: str = Field(default="", alias="GOOGLE_SHEETS_ID")
+    google_credentials_json: str = Field(default="", alias="GOOGLE_CREDENTIALS_JSON")
+    bot_username: str = Field(default="@CDI_Rumis_Bot", alias="BOT_USERNAME")
+
     @field_validator("location_lat", "location_lon", mode="before")
     @classmethod
     def empty_float_to_none(cls, v: Any) -> Any:
@@ -51,12 +55,28 @@ class Settings(BaseSettings):
 
     @property
     def admin_id_list(self) -> list[int]:
+        from app.services import admin_access
+
+        cached = admin_access.cached_admin_ids()
+        if cached:
+            return cached
+        # Before first sync (or empty DB): fall back to .env
+        if not self.admin_ids.strip():
+            return []
+        return [int(x.strip()) for x in self.admin_ids.split(",") if x.strip()]
+
+    @property
+    def env_owner_ids(self) -> list[int]:
         if not self.admin_ids.strip():
             return []
         return [int(x.strip()) for x in self.admin_ids.split(",") if x.strip()]
 
     def is_admin(self, user_id: int) -> bool:
-        return user_id in self.admin_id_list
+        from app.services import admin_access
+
+        if admin_access.cached_admin_ids():
+            return admin_access.is_admin(user_id)
+        return user_id in self.env_owner_ids
 
 
 @lru_cache
