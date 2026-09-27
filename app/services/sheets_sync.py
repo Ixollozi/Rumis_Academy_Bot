@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -181,6 +181,183 @@ def _write_row(ws, row_1based: int, row_values: list) -> None:
     )
 
 
+def _telegram(user) -> str:
+    return f"@{user.username}" if user.username else ""
+
+
+def _fmt_date(d: date) -> str:
+    return d.strftime("%d/%m/%Y")
+
+
+def _norm_date(value: str) -> str:
+    """Normalize sheet/bot dates to dd/mm/YYYY for comparison."""
+    raw = (value or "").strip().replace(".", "/").replace("-", "/")
+    if not raw:
+        return ""
+    for fmt in ("%d/%m/%Y", "%Y/%m/%d", "%d/%m/%y"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    return raw.lower()
+
+
+def _cell(row: list[str], col: int | None) -> str:
+    if col is None or col >= len(row):
+        return ""
+    return str(row[col]).strip()
+
+
+def split_name(full_name: str) -> tuple[str, str]:
+    """'Ivan Petrov' → ('Ivan', 'Petrov'); single token → (token, '')."""
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def parse_result_scores(text: str) -> dict[str, str]:
+    """
+    Extract Listening/Reading/Writing/Speaking/Overall from free-form admin text.
+    Supports labels and compact forms: L 7.0 / Listening: 7 / Overall Band 6.5
+    """
+    raw = text or ""
+    out: dict[str, str] = {}
+    patterns = {
+        "Listening": r"(?:listening|\bL\b)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)",
+        "Reading": r"(?:reading|\bR\b)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)",
+        "Writing": r"(?:writing|\bW\b)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)",
+        "Speaking": r"(?:speaking|\bS\b)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)",
+        "Overall Band": (
+            r"(?:overall\s*band(?:\s*score)?|overall|\bOA\b|\bOV\b)"
+            r"\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)"
+        ),
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, raw, re.I)
+        if m:
+            out[key] = m.group(1).replace(",", ".")
+    return out
+
+
+def _person_match_row(
+    values: list[list[str]],
+    header_idx: int,
+    headers: dict[str, int],
+    *,
+    full_name: str,
+    phone: str,
+    telegram: str,
+    dob: str,
+) -> tuple[int | None, str | None]:
+    """
+    Find Students row where person data fully matches
+    (Full Name + Phone + Telegram + Date of Birth).
+    Returns (1-based row, student_id) or (None, None).
+    """
+    name_col = headers.get("full name")
+    phone_col = headers.get("phone")
+    tg_col = headers.get("telegram")
+    dob_col = headers.get("date of birth")
+    id_col = headers.get("student id")
+    want_name = (full_name or "").strip().lower()
+    want_phone = re.sub(r"\D", "", phone or "")
+    want_tg = (telegram or "").strip().lower().lstrip("@")
+    want_dob = _norm_date(dob)
+    if not want_name:
+        return None, None
+
+    for i, row in enumerate(values[header_idx + 1 :], start=header_idx + 2):
+        if _cell(row, name_col).lower() != want_name:
+            continue
+        row_phone = re.sub(r"\D", "", _cell(row, phone_col))
+        if row_phone != want_phone:
+            continue
+        row_tg = _cell(row, tg_col).lower().lstrip("@")
+        if row_tg != want_tg:
+            continue
+        # If DOB column absent in sheet, ignore DOB; if present — must match exactly
+        if dob_col is not None:
+            if _norm_date(_cell(row, dob_col)) != want_dob:
+                continue
+        sid = _cell(row, id_col) if id_col is not None else ""
+        return i, sid or None
+    return None, None
+
+
+def _resolve_student_id(
+    values: list[list[str]],
+    header_idx: int,
+    headers: dict[str, int],
+    booking: Booking,
+) -> str | None:
+    _, existing_id = _person_match_row(
+        values,
+        header_idx,
+        headers,
+        full_name=booking.full_name_en,
+        phone=booking.user.phone or "",
+        telegram=_telegram(booking.user),
+        dob=_fmt_date(booking.birth_date),
+    )
+    return existing_id
+
+
+def _resolve_student_for_booking(
+    students_ws,
+    s_values: list[list[str]],
+    s_hidx: int,
+    s_headers: dict[str, int],
+    booking: Booking,
+) -> tuple[str, list[list[str]], dict[str, int], bool]:
+    """
+    Fully matching person data → reuse Student ID (no new Students row).
+    Different data (even same TG) → new Student ID + new Students row.
+    """
+    existing_id = _resolve_student_id(s_values, s_hidx, s_headers, booking)
+    if existing_id:
+        return existing_id, s_values, s_headers, False
+
+    user = booking.user
+    id_col = s_headers.get("student id")
+    sheet_uid = _next_student_id(s_values, s_hidx, id_col)
+    hash_col = s_headers.get("#")
+    next_no = _next_hash(s_values, s_hidx, hash_col)
+    enroll = _fmt_date(booking.exam_date.exam_day)
+    width = max(len(r) for r in s_values) if s_values else len(s_headers)
+    row = _build_row(
+        width,
+        s_headers,
+        {
+            "#": next_no,
+            "Student ID": sheet_uid,
+            "Full Name": booking.full_name_en,
+            "Phone": user.phone or "",
+            "Telegram": _telegram(user),
+            "Enrollment Date": enroll,
+            "Date of Birth": _fmt_date(booking.birth_date),
+        },
+    )
+    _write_row(students_ws, len(s_values) + 1, row)
+    s_values = s_values + [row]
+    return sheet_uid, s_values, s_headers, True
+
+
+def _results_person_fields(booking: Booking, sheet_uid: str) -> dict[str, str | int]:
+    first, last = split_name(booking.full_name_en)
+    return {
+        "Student ID": sheet_uid,
+        "User ID": sheet_uid,
+        "Student Name": booking.full_name_en,
+        "Name": first,
+        "Surname": last,
+        "First Name": first,
+        "Last Name": last,
+    }
+
+
 def _find_data_row(
     values: list[list[str]],
     header_idx: int,
@@ -194,34 +371,33 @@ def _find_data_row(
     """Return 1-based sheet row matching Student ID + date (+ optional extras)."""
     id_col = headers.get("student id")
     date_col = headers.get(_norm(date_header))
-    if id_col is None:
+    if id_col is None or not student_id:
         return None
+    want_date = _norm_date(date_value)
     extra = extra or {}
     for i, row in enumerate(values[header_idx + 1 :], start=header_idx + 2):
         if id_col >= len(row) or str(row[id_col]).strip().lower() != student_id.lower():
             continue
         if date_col is not None:
-            if date_col >= len(row) or str(row[date_col]).strip() != date_value:
+            if date_col >= len(row) or _norm_date(str(row[date_col])) != want_date:
                 continue
         ok = True
         for hname, hval in extra.items():
             c = headers.get(_norm(hname))
             if c is None:
                 continue
-            if c >= len(row) or str(row[c]).strip() != hval:
+            cell = _cell(row, c)
+            # Normalize dates in extras when header looks like a date field
+            if "date" in _norm(hname):
+                if _norm_date(cell) != _norm_date(hval):
+                    ok = False
+                    break
+            elif cell != hval:
                 ok = False
                 break
         if ok:
             return i
     return None
-
-
-def _telegram(user) -> str:
-    return f"@{user.username}" if user.username else ""
-
-
-def _fmt_date(d: date) -> str:
-    return d.strftime("%d/%m/%Y")
 
 
 async def on_booking_paid(
@@ -243,30 +419,19 @@ async def on_booking_paid(
             students, s_values, s_hidx, s_headers, "Date of Birth"
         )
 
-        sheet_uid = user.sheet_user_id
-        if not sheet_uid:
-            id_col = s_headers.get("student id")
-            sheet_uid = _next_student_id(s_values, s_hidx, id_col)
-            hash_col = s_headers.get("#")
-            next_no = _next_hash(s_values, s_hidx, hash_col)
-            enroll = _fmt_date(booking.exam_date.exam_day)
-            width = max(len(r) for r in s_values) if s_values else len(s_headers)
-            row = _build_row(
-                width,
-                s_headers,
-                {
-                    "#": next_no,
-                    "Student ID": sheet_uid,
-                    "Full Name": booking.full_name_en,
-                    "Phone": user.phone or "",
-                    "Telegram": _telegram(user),
-                    "Enrollment Date": enroll,
-                    "Date of Birth": _fmt_date(booking.birth_date),
-                },
+        sheet_uid, s_values, s_headers, created = _resolve_student_for_booking(
+            students, s_values, s_hidx, s_headers, booking
+        )
+        user.sheet_user_id = sheet_uid
+        await session.flush()
+        if created:
+            logger.info("Students: new row %s for booking #%s", sheet_uid, booking.id)
+        else:
+            logger.info(
+                "Students: reuse %s for booking #%s (same person data)",
+                sheet_uid,
+                booking.id,
             )
-            _write_row(students, len(s_values) + 1, row)
-            user.sheet_user_id = sheet_uid
-            await session.flush()
 
         # Session Log
         sess_values = sessions.get_all_values()
@@ -298,9 +463,13 @@ async def on_booking_paid(
         )
         _write_row(sessions, len(sess_values) + 1, sess_row)
 
-        # Results stub
+        # Results stub (scores filled later on_result_saved)
         r_values = results.get_all_values()
         r_hidx, r_headers = find_header_row(r_values)
+        for hdr in ("Name", "Surname"):
+            r_values, r_headers = _ensure_header(
+                results, r_values, r_hidx, r_headers, hdr
+            )
         existing = _find_data_row(
             r_values,
             r_hidx,
@@ -313,14 +482,11 @@ async def on_booking_paid(
             hash_col = r_headers.get("#")
             next_no = _next_hash(r_values, r_hidx, hash_col)
             width = max(len(r) for r in r_values) if r_values else len(r_headers)
-            fields = {
+            fields: dict[str, str | int] = {
                 "#": next_no,
-                "Student ID": sheet_uid,
-                "Student Name": booking.full_name_en,
                 "Test Date": exam,
+                **_results_person_fields(booking, sheet_uid),
             }
-            if booking.result_text and "performance" in r_headers:
-                fields["Performance"] = booking.result_text
             r_row = _build_row(width, r_headers, fields)
             _write_row(results, len(r_values) + 1, r_row)
 
@@ -336,12 +502,40 @@ async def on_result_saved(
         return
     try:
         sh = _open(settings)
+        students = sh.worksheet(STUDENTS_SHEET)
+        s_values = students.get_all_values()
+        s_hidx, s_headers = find_header_row(s_values)
+        s_values, s_headers = _ensure_header(
+            students, s_values, s_hidx, s_headers, "Date of Birth"
+        )
+        matched_id = _resolve_student_id(s_values, s_hidx, s_headers, booking)
+        uid = matched_id or booking.user.sheet_user_id or ""
+        if matched_id and booking.user.sheet_user_id != matched_id:
+            booking.user.sheet_user_id = matched_id
+            await session.flush()
+
         results = sh.worksheet(RESULTS_SHEET)
-        uid = booking.user.sheet_user_id or ""
         exam = _fmt_date(booking.exam_date.exam_day)
         all_rows = results.get_all_values()
         hidx, headers = find_header_row(all_rows)
-        perf_col = headers.get("performance")
+        for hdr in ("Name", "Surname"):
+            all_rows, headers = _ensure_header(results, all_rows, hidx, headers, hdr)
+
+        text = booking.result_text or ""
+        scores = parse_result_scores(text)
+        person = _results_person_fields(booking, uid)
+        fields: dict[str, str | int] = {
+            **person,
+            "Test Date": exam,
+            "Listening": scores.get("Listening", ""),
+            "Reading": scores.get("Reading", ""),
+            "Writing": scores.get("Writing", ""),
+            "Speaking": scores.get("Speaking", ""),
+            "Overall Band": scores.get("Overall Band", ""),
+            "Overall Band Score": scores.get("Overall Band", ""),
+            "Performance": text,
+        }
+
         row_i = _find_data_row(
             all_rows,
             hidx,
@@ -350,26 +544,28 @@ async def on_result_saved(
             date_header="Test Date",
             date_value=exam,
         )
-        text = booking.result_text or ""
-        if row_i is not None and perf_col is not None:
-            results.update(
-                values=[[text]],
-                range_name=f"{_col_letter(perf_col)}{row_i}",
-            )
-        elif row_i is not None:
-            # Fallback: no Performance column — skip body write
-            logger.warning("Results sheet has no Performance column")
+        width = max(
+            max((len(r) for r in all_rows), default=0),
+            max(headers.values(), default=-1) + 1,
+        )
+        if row_i is not None:
+            hash_col = headers.get("#")
+            existing = all_rows[row_i - 1] if row_i - 1 < len(all_rows) else []
+            base = list(existing) + [""] * max(0, width - len(existing))
+            built = _build_row(width, headers, fields)
+            for j, val in enumerate(built):
+                if not val:
+                    continue
+                while len(base) <= j:
+                    base.append("")
+                if hash_col is not None and j == hash_col and base[j].strip():
+                    continue
+                base[j] = val
+            _write_row(results, row_i, base)
         else:
             hash_col = headers.get("#")
             next_no = _next_hash(all_rows, hidx, hash_col)
-            width = max(len(r) for r in all_rows) if all_rows else len(headers)
-            fields = {
-                "#": next_no,
-                "Student ID": uid,
-                "Student Name": booking.full_name_en,
-                "Test Date": exam,
-                "Performance": text,
-            }
+            fields["#"] = next_no
             r_row = _build_row(width, headers, fields)
             _write_row(results, len(all_rows) + 1, r_row)
     except Exception:
@@ -384,8 +580,13 @@ async def on_post_exam(
         return
     try:
         sh = _open(settings)
+        students = sh.worksheet(STUDENTS_SHEET)
+        s_values = students.get_all_values()
+        s_hidx, s_headers = find_header_row(s_values)
+        matched_id = _resolve_student_id(s_values, s_hidx, s_headers, booking)
+        uid = matched_id or booking.user.sheet_user_id or ""
+
         sessions = sh.worksheet(SESSION_SHEET)
-        uid = booking.user.sheet_user_id or ""
         exam = _fmt_date(booking.exam_date.exam_day)
         code = ""
         if booking.speaking_examiner:

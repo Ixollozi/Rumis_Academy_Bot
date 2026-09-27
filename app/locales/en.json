@@ -105,7 +105,7 @@
   "admin_pick_post": "📨 Send post-exam manually:",
   "admin_prices_now": "💰 Current prices:\nOwn: {own}\nNew: {new}\n\nEnter: own new\nExample: 75000 150000",
   "admin_prices_saved": "✅ Saved: {own} / {new}",
-  "admin_ask_result": "✍️ Enter result text for booking #{id}:",
+  "admin_ask_result": "✍️ Enter result for booking #{id}.\nExample:\nListening: 7.0\nReading: 6.5\nWriting: 6.0\nSpeaking: 7.0\nOverall: 6.5",
   "admin_result_saved": "✅ Result saved and sent to student.",
   "admin_post_sent": "✅ Post-exam sent for booking #{id}.",
   "admin_export_ready": "✅ Excel is ready.",

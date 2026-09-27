@@ -105,7 +105,7 @@
   "admin_pick_post": "📨 Post-imtihonni qo'lda yuborish:",
   "admin_prices_now": "💰 Joriy narxlar:\nO'z: {own}\nYangi: {new}\n\nKiriting: own new\nMasalan: 75000 150000",
   "admin_prices_saved": "✅ Saqlandi: {own} / {new}",
-  "admin_ask_result": "✍️ #{id} uchun natija matnini kiriting:",
+  "admin_ask_result": "✍️ #{id} uchun natijani kiriting.\nMasalan:\nListening: 7.0\nReading: 6.5\nWriting: 6.0\nSpeaking: 7.0\nOverall: 6.5",
   "admin_result_saved": "✅ Natija saqlandi va o'quvchiga yuborildi.",
   "admin_post_sent": "✅ #{id} uchun post-imtihon yuborildi.",
   "admin_export_ready": "✅ Excel tayyor.",

@@ -13,7 +13,10 @@ router = Router(name="location")
 @router.message(F.text.in_(all_t("btn_location")))
 async def location(message: Message, session: AsyncSession, settings: Settings) -> None:
     user = await repo.get_or_create_user(session, message.from_user.id)
-    maps = settings.maps_url or "—"
+    maps = settings.maps_url or (
+        "https://maps.google.com/maps?q=41.364602,69.273439"
+        "&ll=41.364602,69.273439&z=16"
+    )
     await message.answer(
         t(
             user.lang,
@@ -24,10 +27,17 @@ async def location(message: Message, session: AsyncSession, settings: Settings) 
             maps=h(maps),
         )
     )
-    if settings.location_lat is not None and settings.location_lon is not None:
-        await message.answer_location(
-            latitude=settings.location_lat, longitude=settings.location_lon
+    lat = settings.location_lat if settings.location_lat is not None else 41.364602
+    lon = settings.location_lon if settings.location_lon is not None else 69.273439
+    try:
+        await message.answer_venue(
+            latitude=lat,
+            longitude=lon,
+            title=settings.center_name or "Rumis Academy",
+            address=settings.center_address or "Майкурган 26/2",
         )
+    except Exception:
+        await message.answer_location(latitude=lat, longitude=lon)
 
 
 @router.message(F.text.in_(all_t("btn_contact_admin")))

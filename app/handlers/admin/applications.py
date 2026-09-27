@@ -396,6 +396,32 @@ async def mark_paid(
             address=h(settings.center_address or "—"),
         ),
     )
+    # Venue pin (title visible like Azamat's sample) right after confirmation
+    lat = (
+        settings.location_lat
+        if settings.location_lat is not None
+        else 41.364602
+    )
+    lon = (
+        settings.location_lon
+        if settings.location_lon is not None
+        else 69.273439
+    )
+    try:
+        await callback.bot.send_venue(
+            chat_id=booking.user.tg_id,
+            latitude=lat,
+            longitude=lon,
+            title=settings.center_name or "Rumis Academy",
+            address=settings.center_address or "Майкурган 26/2",
+        )
+    except Exception:
+        try:
+            await callback.bot.send_location(
+                booking.user.tg_id, latitude=lat, longitude=lon
+            )
+        except Exception:
+            pass
     try:
         await sheets_sync.on_booking_paid(session, booking, settings)
     except Exception:

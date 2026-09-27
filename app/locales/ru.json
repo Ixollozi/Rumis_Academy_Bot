@@ -105,7 +105,7 @@
   "admin_pick_post": "📨 Отправить пост-экзамен вручную:",
   "admin_prices_now": "💰 Текущие цены:\nСвой: {own}\nНовый: {new}\n\nВведите: own new\nПример: 75000 150000",
   "admin_prices_saved": "✅ Цены сохранены: {own} / {new}",
-  "admin_ask_result": "✍️ Введите текст результата для заявки #{id}:",
+  "admin_ask_result": "✍️ Введите результат для заявки #{id}.\nПример:\nListening: 7.0\nReading: 6.5\nWriting: 6.0\nSpeaking: 7.0\nOverall: 6.5",
   "admin_result_saved": "✅ Результат сохранён и отправлен ученику.",
   "admin_post_sent": "✅ Пост-экзамен отправлен для заявки #{id}.",
   "admin_export_ready": "✅ Excel готов.",
