@@ -15,7 +15,7 @@ from app.keyboards import (
     paid_kb,
 )
 from app.locales.i18n import t
-from app.services import sheets_sync
+from app.services import admin_cards, sheets_sync
 from app.states import PaymentSG
 from app.utils import format_dmY, format_price, h
 
@@ -27,6 +27,27 @@ STATUS_MAP = {
     "payment_review": BookingStatus.payment_review,
     "paid": BookingStatus.paid,
 }
+
+
+async def _stale(
+    callback: CallbackQuery, session: AsyncSession, booking, *, lang: str
+) -> None:
+    """Alert + strip keyboard when another admin already processed this booking."""
+    await safe_answer(callback, t(lang, "admin_already_processed"), show_alert=True)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if booking and callback.message:
+        await admin_cards.finalize_cards(
+            callback.bot,
+            session,
+            booking,
+            t(lang, "admin_already_processed"),
+            also=(callback.message.chat.id, callback.message.message_id),
+            base_text=callback.message.text,
+        )
+        await session.commit()
 
 
 @router.callback_query(F.data == "adm:apps")
@@ -84,7 +105,11 @@ async def apps_list(
             )
         elif b.status == BookingStatus.payment_review:
             kb = admin_payment_kb(user.lang, b.id)
-        await callback.message.answer(card, reply_markup=kb)
+        sent = await callback.message.answer(card, reply_markup=kb)
+        if kb is not None:
+            b = await admin_cards.remember_card(
+                session, b, chat_id=sent.chat.id, message_id=sent.message_id
+            )
         if b.payment_file_id:
             try:
                 if b.payment_file_type == "document":
@@ -93,6 +118,7 @@ async def apps_list(
                     await callback.message.answer_photo(b.payment_file_id)
             except Exception:
                 pass
+    await session.commit()
     await callback.message.answer("—", reply_markup=admin_menu_kb(user.lang))
     await callback.answer()
 
@@ -104,18 +130,33 @@ async def assign_price(
     if not settings.is_admin(callback.from_user.id):
         await callback.answer("no", show_alert=True)
         return
+    admin = await repo.get_or_create_user(session, callback.from_user.id)
     _, _, booking_id_s, price_s = callback.data.split(":")
     booking = await repo.get_booking(session, int(booking_id_s))
     if not booking:
         await callback.answer("not found", show_alert=True)
         return
-    booking = await repo.set_booking_price(
+    if booking.status != BookingStatus.pending_price:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    updated = await repo.set_booking_price(
         booking=booking, session=session, price=int(price_s)
     )
-    lang = booking.user.lang
-    await callback.message.edit_text(
-        callback.message.text + f"\n\n→ price {price_s}"
+    if updated is None:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    booking = updated
+    footer = f"→ price {price_s}"
+    await admin_cards.finalize_cards(
+        callback.bot,
+        session,
+        booking,
+        footer,
+        also=(callback.message.chat.id, callback.message.message_id),
+        base_text=callback.message.text,
     )
+    await session.commit()
+    lang = booking.user.lang
     await callback.bot.send_message(
         booking.user.tg_id,
         t(
@@ -136,16 +177,32 @@ async def reject_app(
     if not settings.is_admin(callback.from_user.id):
         await callback.answer("no", show_alert=True)
         return
+    admin = await repo.get_or_create_user(session, callback.from_user.id)
     booking_id = int(callback.data.split(":")[2])
     booking = await repo.get_booking(session, booking_id)
     if not booking:
         await callback.answer("not found", show_alert=True)
         return
-    booking = await repo.reject_booking(session, booking)
-    await callback.bot.send_message(
-        booking.user.tg_id, t(booking.user.lang, "payment_rejected")
+    if booking.status != BookingStatus.pending_price:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    updated = await repo.reject_booking(session, booking)
+    if updated is None:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    booking = updated
+    await admin_cards.finalize_cards(
+        callback.bot,
+        session,
+        booking,
+        "→ rejected",
+        also=(callback.message.chat.id, callback.message.message_id),
+        base_text=callback.message.text,
     )
-    await callback.message.edit_text(callback.message.text + "\n\n→ rejected")
+    await session.commit()
+    await callback.bot.send_message(
+        booking.user.tg_id, t(booking.user.lang, "application_rejected")
+    )
     await callback.answer("OK")
 
 
@@ -189,7 +246,6 @@ async def _submit_receipt(
         booking_id = int(data.get("booking_id") or 0)
     booking = await repo.get_booking(session, booking_id) if booking_id else None
     if not booking or booking.user.tg_id != message.from_user.id:
-        # try latest awaiting booking
         bookings = await repo.list_user_bookings(session, user.id)
         booking = next(
             (
@@ -226,12 +282,17 @@ async def _submit_receipt(
         status=booking.status.value,
         price=format_price(booking.price),
     )
+    # Clear old price cards; new payment cards will be remembered
+    booking = await admin_cards.clear_cards(session, booking)
     for admin_id in settings.admin_id_list:
         try:
-            await message.bot.send_message(
+            sent = await message.bot.send_message(
                 admin_id,
                 f"{t('ru', 'payment_notify')}\n\n{card}",
                 reply_markup=admin_payment_kb("ru", booking.id),
+            )
+            booking = await admin_cards.remember_card(
+                session, booking, chat_id=sent.chat.id, message_id=sent.message_id
             )
             if file_type == "document":
                 await message.bot.send_document(admin_id, file_id)
@@ -239,6 +300,7 @@ async def _submit_receipt(
                 await message.bot.send_photo(admin_id, file_id)
         except Exception:
             pass
+    await session.commit()
 
 
 @router.message(PaymentSG.await_receipt, F.photo)
@@ -291,8 +353,16 @@ async def mark_paid(
         await callback.answer("not found", show_alert=True)
         return
     admin = await repo.get_or_create_user(session, callback.from_user.id)
+    if booking.status != BookingStatus.payment_review:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
     updated = await repo.mark_paid(session, booking)
     if updated is None:
+        # Either race (status changed) or seat limit
+        refreshed = await repo.get_booking(session, booking_id)
+        if refreshed and refreshed.status != BookingStatus.payment_review:
+            await _stale(callback, session, refreshed, lang=admin.lang)
+            return
         paid = await repo.paid_count_for_date(session, booking.exam_date_id)
         await safe_answer(
             callback,
@@ -306,6 +376,16 @@ async def mark_paid(
         )
         return
     booking = updated
+    footer = f"→ {t(admin.lang, 'admin_mark_paid')}"
+    await admin_cards.finalize_cards(
+        callback.bot,
+        session,
+        booking,
+        footer,
+        also=(callback.message.chat.id, callback.message.message_id),
+        base_text=callback.message.text,
+    )
+    await session.commit()
     await callback.bot.send_message(
         booking.user.tg_id,
         t(
@@ -316,10 +396,6 @@ async def mark_paid(
             address=h(settings.center_address or "—"),
         ),
     )
-    await callback.message.edit_text(
-        (callback.message.text or "") + f"\n\n→ {t(admin.lang, 'admin_mark_paid')}"
-    )
-    # Google Sheets sync (best-effort)
     try:
         await sheets_sync.on_booking_paid(session, booking, settings)
     except Exception:
@@ -334,14 +410,30 @@ async def unpay(
     if not settings.is_admin(callback.from_user.id):
         await callback.answer("no", show_alert=True)
         return
+    admin = await repo.get_or_create_user(session, callback.from_user.id)
     booking_id = int(callback.data.split(":")[2])
     booking = await repo.get_booking(session, booking_id)
     if not booking:
         await callback.answer("not found", show_alert=True)
         return
-    booking = await repo.mark_payment_rejected(session, booking)
+    if booking.status != BookingStatus.payment_review:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    updated = await repo.mark_payment_rejected(session, booking)
+    if updated is None:
+        await _stale(callback, session, booking, lang=admin.lang)
+        return
+    booking = updated
+    await admin_cards.finalize_cards(
+        callback.bot,
+        session,
+        booking,
+        "→ payment rejected",
+        also=(callback.message.chat.id, callback.message.message_id),
+        base_text=callback.message.text,
+    )
+    await session.commit()
     await callback.bot.send_message(
         booking.user.tg_id, t(booking.user.lang, "payment_rejected")
     )
-    await callback.message.edit_text(callback.message.text + "\n\n→ payment rejected")
     await callback.answer("OK")

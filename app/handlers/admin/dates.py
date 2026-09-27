@@ -47,7 +47,7 @@ async def admin_dates(
     if not _admin_ok(settings, callback.from_user.id):
         await callback.answer("no", show_alert=True)
         return
-    dates = await repo.list_all_exam_dates(session)
+    dates = await repo.list_admin_exam_dates(session, tz_name=settings.timezone)
     user = await repo.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(
         t(user.lang, "admin_dates"), reply_markup=admin_dates_list_kb(user.lang, dates)

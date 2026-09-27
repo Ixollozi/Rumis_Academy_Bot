@@ -164,6 +164,20 @@ async def list_all_exam_dates(session: AsyncSession) -> list[ExamDate]:
     return list(result.scalars().all())
 
 
+async def list_admin_exam_dates(
+    session: AsyncSession, *, tz_name: str = "Asia/Tashkent"
+) -> list[ExamDate]:
+    """Admin Main Test list: today and future only (past dates hidden)."""
+    today = datetime.now(ZoneInfo(tz_name)).date()
+    result = await session.execute(
+        select(ExamDate)
+        .options(selectinload(ExamDate.slots))
+        .where(ExamDate.exam_day >= today)
+        .order_by(ExamDate.exam_day.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_exam_date(session: AsyncSession, exam_date_id: int) -> ExamDate | None:
     result = await session.execute(
         select(ExamDate)
@@ -293,14 +307,20 @@ async def get_booking(session: AsyncSession, booking_id: int) -> Booking | None:
 
 async def set_booking_price(
     session: AsyncSession, booking: Booking, price: int
-) -> Booking:
+) -> Booking | None:
+    """Assign price only from pending_price. Returns None if status already changed."""
+    if booking.status != BookingStatus.pending_price:
+        return None
     booking.price = price
     booking.status = BookingStatus.awaiting_payment
     await session.flush()
     return await get_booking(session, booking.id)  # type: ignore[return-value]
 
 
-async def reject_booking(session: AsyncSession, booking: Booking) -> Booking:
+async def reject_booking(session: AsyncSession, booking: Booking) -> Booking | None:
+    """Reject only from pending_price. Returns None if already processed."""
+    if booking.status != BookingStatus.pending_price:
+        return None
     booking.status = BookingStatus.rejected
     await session.flush()
     return await get_booking(session, booking.id)  # type: ignore[return-value]
@@ -327,6 +347,9 @@ async def can_accept_paid(session: AsyncSession, exam_date: ExamDate) -> bool:
 
 
 async def mark_paid(session: AsyncSession, booking: Booking) -> Booking | None:
+    """Mark paid only from payment_review (and if seats remain)."""
+    if booking.status != BookingStatus.payment_review:
+        return None
     exam_date = booking.exam_date
     if exam_date is None:
         exam_date = await session.get(ExamDate, booking.exam_date_id)
@@ -339,7 +362,10 @@ async def mark_paid(session: AsyncSession, booking: Booking) -> Booking | None:
     return await get_booking(session, booking.id)
 
 
-async def mark_payment_rejected(session: AsyncSession, booking: Booking) -> Booking:
+async def mark_payment_rejected(session: AsyncSession, booking: Booking) -> Booking | None:
+    """Reject payment only from payment_review."""
+    if booking.status != BookingStatus.payment_review:
+        return None
     booking.status = BookingStatus.rejected
     await session.flush()
     return await get_booking(session, booking.id)  # type: ignore[return-value]

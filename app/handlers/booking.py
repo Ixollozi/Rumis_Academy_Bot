@@ -237,9 +237,11 @@ async def booking_confirm(
         status=h(booking.status.value),
         price="—",
     )
+    from app.services import admin_cards
+
     for admin_id in settings.admin_id_list:
         try:
-            await callback.bot.send_message(
+            sent = await callback.bot.send_message(
                 admin_id,
                 f"{t('ru', 'new_app_notify')}\n\n{card}",
                 reply_markup=admin_price_assign_kb(
@@ -249,5 +251,9 @@ async def booking_confirm(
                     app_settings.price_new,
                 ),
             )
+            booking = await admin_cards.remember_card(
+                session, booking, chat_id=sent.chat.id, message_id=sent.message_id
+            )
         except Exception:
             pass
+    await session.commit()

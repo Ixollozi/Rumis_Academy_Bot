@@ -74,6 +74,11 @@ async def upgrade_schema(engine: AsyncEngine) -> None:
                 )
             )
             logger.info("Added bookings.speaking_prompted")
+        if "admin_card_messages" not in cols:
+            await conn.execute(
+                text("ALTER TABLE bookings ADD COLUMN admin_card_messages TEXT")
+            )
+            logger.info("Added bookings.admin_card_messages")
 
         # users.sheet_user_id
         if await _table_exists(conn, "users"):
