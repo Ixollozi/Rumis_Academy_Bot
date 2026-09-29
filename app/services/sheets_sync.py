@@ -562,12 +562,23 @@ async def on_result_saved(
                     continue
                 base[j] = val
             _write_row(results, row_i, base)
+            logger.info(
+                "Sheets Results updated row %s uid=%s scores=%s",
+                row_i,
+                uid,
+                {k: scores[k] for k in scores},
+            )
         else:
             hash_col = headers.get("#")
             next_no = _next_hash(all_rows, hidx, hash_col)
             fields["#"] = next_no
             r_row = _build_row(width, headers, fields)
             _write_row(results, len(all_rows) + 1, r_row)
+            logger.info(
+                "Sheets Results appended uid=%s scores=%s",
+                uid,
+                {k: scores[k] for k in scores},
+            )
     except Exception:
         logger.exception("Sheets on_result_saved failed")
 

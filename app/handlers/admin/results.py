@@ -130,6 +130,14 @@ async def result_resend(
             result=booking.result_text,
         ),
     )
+    try:
+        from app.services import sheets_sync
+
+        await sheets_sync.on_result_saved(session, booking, settings)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("sheets on_result_saved (resend) failed")
     await callback.answer(t(user.lang, "admin_results_resent"), show_alert=True)
 
 
@@ -178,7 +186,9 @@ async def result_save(
 
         await sheets_sync.on_result_saved(session, booking, settings)
     except Exception:
-        pass
+        import logging
+
+        logging.getLogger(__name__).exception("sheets on_result_saved failed")
     await message.answer(
         t(user.lang, "admin_result_saved"), reply_markup=admin_menu_kb(user.lang)
     )
