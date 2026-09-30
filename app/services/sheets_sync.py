@@ -590,38 +590,97 @@ async def on_post_exam(
     if not _enabled(settings):
         return
     try:
+        from app.db.models import SpeakingExaminer
+
         sh = _open(settings)
-        students = sh.worksheet(STUDENTS_SHEET)
-        s_values = students.get_all_values()
-        s_hidx, s_headers = find_header_row(s_values)
-        matched_id = _resolve_student_id(s_values, s_hidx, s_headers, booking)
-        uid = matched_id or booking.user.sheet_user_id or ""
+        uid = (booking.user.sheet_user_id or "").strip()
+        if not uid:
+            students = sh.worksheet(STUDENTS_SHEET)
+            s_values = students.get_all_values()
+            s_hidx, s_headers = find_header_row(s_values)
+            matched_id = _resolve_student_id(s_values, s_hidx, s_headers, booking)
+            uid = matched_id or ""
+
+        # Prefer @contact (what admins see in TG), fallback to teacher code
+        code = ""
+        examiner = booking.speaking_examiner
+        if examiner is None and booking.speaking_examiner_id:
+            examiner = await session.get(SpeakingExaminer, booking.speaking_examiner_id)
+        if examiner:
+            code = (examiner.contact or "").strip() or (examiner.teacher_code or "").strip()
+        if not code:
+            logger.warning(
+                "Sheets on_post_exam: no examiner contact for booking #%s", booking.id
+            )
+            return
 
         sessions = sh.worksheet(SESSION_SHEET)
         exam = _fmt_date(booking.exam_date.exam_day)
-        code = ""
-        if booking.speaking_examiner:
-            code = (
-                booking.speaking_examiner.teacher_code
-                or booking.speaking_examiner.contact
-                or ""
-            )
         rows = sessions.get_all_values()
         hidx, headers = find_header_row(rows)
         teacher_col = headers.get("speaking teacher id")
-        row_i = _find_data_row(
-            rows,
-            hidx,
-            headers,
-            student_id=uid,
-            date_header="Date",
-            date_value=exam,
-            extra={"Session": booking.slot},
-        )
-        if row_i is not None and teacher_col is not None:
-            sessions.update(
-                values=[[code]],
-                range_name=f"{_col_letter(teacher_col)}{row_i}",
+        if teacher_col is None:
+            logger.warning("Session Log has no Speaking Teacher ID column")
+            return
+
+        row_i = None
+        if uid:
+            row_i = _find_data_row(
+                rows,
+                hidx,
+                headers,
+                student_id=uid,
+                date_header="Date",
+                date_value=exam,
+                extra={"Session": booking.slot},
             )
+            if row_i is None:
+                # Fallback: same student+date without session match
+                row_i = _find_data_row(
+                    rows,
+                    hidx,
+                    headers,
+                    student_id=uid,
+                    date_header="Date",
+                    date_value=exam,
+                )
+        if row_i is None:
+            # Fallback: Student Name + Date + Session
+            name_col = headers.get("student name")
+            date_col = headers.get("date")
+            sess_col = headers.get("session")
+            want_name = (booking.full_name_en or "").strip().lower()
+            want_date = _norm_date(exam)
+            want_slot = (booking.slot or "").strip()
+            for i, row in enumerate(rows[hidx + 1 :], start=hidx + 2):
+                if name_col is not None and _cell(row, name_col).lower() != want_name:
+                    continue
+                if date_col is not None and _norm_date(_cell(row, date_col)) != want_date:
+                    continue
+                if sess_col is not None and want_slot and _cell(row, sess_col) != want_slot:
+                    continue
+                row_i = i
+                break
+
+        if row_i is None:
+            logger.warning(
+                "Sheets on_post_exam: Session row not found booking #%s uid=%s date=%s slot=%s",
+                booking.id,
+                uid,
+                exam,
+                booking.slot,
+            )
+            return
+
+        sessions.update(
+            values=[[code]],
+            range_name=f"{_col_letter(teacher_col)}{row_i}",
+        )
+        logger.info(
+            "Sheets Session Log speaking teacher row=%s booking=#%s → %s",
+            row_i,
+            booking.id,
+            code,
+        )
     except Exception:
         logger.exception("Sheets on_post_exam failed")

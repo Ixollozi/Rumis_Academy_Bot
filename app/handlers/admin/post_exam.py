@@ -110,6 +110,13 @@ async def pick_examiner(
         session,
         contact=examiner.contact,
     )
+    # Ensure Sheets gets examiner even if post_exam_sent was already True
+    try:
+        from app.services import sheets_sync
+
+        await sheets_sync.on_post_exam(session, booking, settings)
+    except Exception:
+        pass
     await callback.message.edit_text(
         (callback.message.text or "")
         + f"\n\n→ Speaking: {examiner.name} ({examiner.contact})"
