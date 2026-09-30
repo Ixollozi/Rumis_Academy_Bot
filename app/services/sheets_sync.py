@@ -105,19 +105,6 @@ def _col_letter(idx0: int) -> str:
     return "".join(reversed(letters))
 
 
-def _next_hash(values: list[list[str]], header_idx: int, hash_col: int | None) -> int:
-    max_n = 0
-    if hash_col is None:
-        return max(1, len(values) - header_idx)
-    for row in values[header_idx + 1 :]:
-        if hash_col >= len(row):
-            continue
-        cell = str(row[hash_col]).strip()
-        if cell.isdigit():
-            max_n = max(max_n, int(cell))
-    return max_n + 1
-
-
 def _next_student_id(values: list[list[str]], header_idx: int, id_col: int | None) -> str:
     max_n = 0
     if id_col is None:
@@ -157,28 +144,129 @@ def _ensure_header(
     return values, headers
 
 
-def _build_row(
-    width: int,
+# Sheet owns these via formulas — bot must never overwrite them.
+_FORMULA_OWNED = frozenset(
+    {
+        "#",
+        "overall band",
+        "overall band score",
+        "performance",
+        "released?",
+        "released",
+        "total sessions",
+    }
+)
+
+
+_NUMERIC_HEADERS = frozenset(
+    {
+        "listening",
+        "reading",
+        "writing",
+        "speaking",
+        "pc (1-10)",
+        "score (0-9)",
+    }
+)
+
+
+def _cell_value(header_key: str, value: str | int | float) -> str | int | float:
+    """Scores must be numbers — text '6.0' breaks AVERAGEIF → empty Overall."""
+    if header_key in _NUMERIC_HEADERS or isinstance(value, (int, float)):
+        raw = str(value).strip().replace(",", ".")
+        try:
+            num = float(raw)
+            return int(num) if num.is_integer() else num
+        except ValueError:
+            return str(value)
+    return str(value)
+
+
+def _write_fields(
+    ws,
+    row_1based: int,
     headers: dict[str, int],
     fields: dict[str, str | int],
-) -> list[str]:
-    row = [""] * max(width, max(headers.values(), default=-1) + 1)
+) -> None:
+    """
+    Write only non-empty mapped cells.
+
+    Never blanks a cell and never touches formula-owned columns (#, Overall,
+    Performance, Released?, …). Full-row updates were wiping sheet formulas.
+    USER_ENTERED so Sheets parses 6.5 as a number (formulas keep working).
+    """
+    data: list[dict] = []
     for name, value in fields.items():
-        col = headers.get(_norm(name))
+        if value is None or str(value).strip() == "":
+            continue
+        key = _norm(name)
+        if key in _FORMULA_OWNED:
+            continue
+        col = headers.get(key)
         if col is None:
             continue
-        while len(row) <= col:
-            row.append("")
-        row[col] = "" if value is None else str(value)
-    return row
+        data.append(
+            {
+                "range": f"{_col_letter(col)}{row_1based}",
+                "values": [[_cell_value(key, value)]],
+            }
+        )
+    if data:
+        ws.batch_update(data, value_input_option="USER_ENTERED")
 
 
-def _write_row(ws, row_1based: int, row_values: list) -> None:
-    end = _col_letter(len(row_values) - 1)
-    ws.update(
-        values=[row_values],
-        range_name=f"A{row_1based}:{end}{row_1based}",
-    )
+# Columns that may be pre-filled by sheet formulas for hundreds of empty rows
+# (e.g. Released? = "⏳ Pending"). Must NOT count as real data when appending.
+_FILLER_ONLY_HEADERS = frozenset(
+    {
+        "released?",
+        "released",
+        "notes",
+        "module",
+        "attendance",
+        "bot notified?",
+    }
+)
+
+
+def _next_append_row(
+    values: list[list[str]],
+    header_idx: int,
+    headers: dict[str, int],
+    *,
+    key_headers: tuple[str, ...] = (
+        "student id",
+        "full name",
+        "student name",
+        "date",
+        "test date",
+    ),
+) -> int:
+    """
+    1-based sheet row for the next record.
+
+    Picks the first row after the header that has no real key data.
+    Sheet formulas often prefill Released?=Pending for hundreds of empty
+    rows; those must not push appends to row 500+. Orphan rows below a
+    gap are ignored so new writes stay contiguous from the top.
+    """
+    key_cols = [headers[k] for k in key_headers if k in headers]
+    filler_cols = {headers[k] for k in _FILLER_ONLY_HEADERS if k in headers}
+
+    def _has_key(row: list) -> bool:
+        if key_cols:
+            return any(c < len(row) and str(row[c]).strip() for c in key_cols)
+        for j, cell in enumerate(row):
+            if j in filler_cols:
+                continue
+            if str(cell).strip():
+                return True
+        return False
+
+    for i, row in enumerate(values[header_idx + 1 :], start=header_idx + 2):
+        if not _has_key(row):
+            return i
+    return len(values) + 1
 
 
 def _telegram(user) -> str:
@@ -323,25 +411,27 @@ def _resolve_student_for_booking(
     user = booking.user
     id_col = s_headers.get("student id")
     sheet_uid = _next_student_id(s_values, s_hidx, id_col)
-    hash_col = s_headers.get("#")
-    next_no = _next_hash(s_values, s_hidx, hash_col)
     enroll = _fmt_date(booking.exam_date.exam_day)
+    fields: dict[str, str | int] = {
+        "Student ID": sheet_uid,
+        "Full Name": booking.full_name_en,
+        "Phone": user.phone or "",
+        "Telegram": _telegram(user),
+        "Enrollment Date": enroll,
+        "Date of Birth": _fmt_date(booking.birth_date),
+    }
+    row_i = _next_append_row(s_values, s_hidx, s_headers)
+    _write_fields(students_ws, row_i, s_headers, fields)
+    # Keep in-memory cache roughly in sync for same-request lookups
     width = max(len(r) for r in s_values) if s_values else len(s_headers)
-    row = _build_row(
-        width,
-        s_headers,
-        {
-            "#": next_no,
-            "Student ID": sheet_uid,
-            "Full Name": booking.full_name_en,
-            "Phone": user.phone or "",
-            "Telegram": _telegram(user),
-            "Enrollment Date": enroll,
-            "Date of Birth": _fmt_date(booking.birth_date),
-        },
-    )
-    _write_row(students_ws, len(s_values) + 1, row)
-    s_values = s_values + [row]
+    stub = [""] * width
+    for name, value in fields.items():
+        col = s_headers.get(_norm(name))
+        if col is not None:
+            while len(stub) <= col:
+                stub.append("")
+            stub[col] = str(value)
+    s_values = s_values + [stub]
     return sheet_uid, s_values, s_headers, True
 
 
@@ -444,24 +534,21 @@ async def on_booking_paid(
                 or booking.speaking_examiner.contact
                 or ""
             )
-        hash_col = sess_headers.get("#")
-        next_no = _next_hash(sess_values, sess_hidx, hash_col)
-        width = max(len(r) for r in sess_values) if sess_values else len(sess_headers)
-        sess_row = _build_row(
-            width,
+        sess_fields: dict[str, str | int] = {
+            "Date": exam,
+            "Session": booking.slot,
+            "Student ID": sheet_uid,
+            "Student Name": booking.full_name_en,
+            "Speaking Teacher ID": examiner_code,
+            "Payment": "✅ Paid",
+            "Bot Notified?": "✅ Sent",
+        }
+        _write_fields(
+            sessions,
+            _next_append_row(sess_values, sess_hidx, sess_headers),
             sess_headers,
-            {
-                "#": next_no,
-                "Date": exam,
-                "Session": booking.slot,
-                "Student ID": sheet_uid,
-                "Student Name": booking.full_name_en,
-                "Speaking Teacher ID": examiner_code,
-                "Payment": "Paid",
-                "Bot Notified?": "✅",
-            },
+            sess_fields,
         )
-        _write_row(sessions, len(sess_values) + 1, sess_row)
 
         # Results stub (scores filled later on_result_saved)
         r_values = results.get_all_values()
@@ -479,16 +566,21 @@ async def on_booking_paid(
             date_value=exam,
         )
         if existing is None:
-            hash_col = r_headers.get("#")
-            next_no = _next_hash(r_values, r_hidx, hash_col)
-            width = max(len(r) for r in r_values) if r_values else len(r_headers)
+            # Only identity + date. # / Overall / Performance / Released? /
+            # Student Name stay as sheet formulas (Name pulls from Students).
+            person = _results_person_fields(booking, sheet_uid)
             fields: dict[str, str | int] = {
-                "#": next_no,
                 "Test Date": exam,
-                **_results_person_fields(booking, sheet_uid),
+                "Student ID": sheet_uid,
+                "Name": person["Name"],
+                "Surname": person["Surname"],
             }
-            r_row = _build_row(width, r_headers, fields)
-            _write_row(results, len(r_values) + 1, r_row)
+            _write_fields(
+                results,
+                _next_append_row(r_values, r_hidx, r_headers),
+                r_headers,
+                fields,
+            )
 
         logger.info("Sheets synced paid booking #%s → %s", booking.id, sheet_uid)
     except Exception:
@@ -524,16 +616,17 @@ async def on_result_saved(
         text = booking.result_text or ""
         scores = parse_result_scores(text)
         person = _results_person_fields(booking, uid)
+        # Scores only — Overall / Performance / # / Released? = sheet formulas.
+        # Writing/Speaking cells: bot is source when admin sends result in TG.
         fields: dict[str, str | int] = {
-            **person,
+            "Student ID": uid,
             "Test Date": exam,
+            "Name": person["Name"],
+            "Surname": person["Surname"],
             "Listening": scores.get("Listening", ""),
             "Reading": scores.get("Reading", ""),
             "Writing": scores.get("Writing", ""),
             "Speaking": scores.get("Speaking", ""),
-            "Overall Band": scores.get("Overall Band", ""),
-            "Overall Band Score": scores.get("Overall Band", ""),
-            "Performance": text,
         }
 
         row_i = _find_data_row(
@@ -544,41 +637,21 @@ async def on_result_saved(
             date_header="Test Date",
             date_value=exam,
         )
-        width = max(
-            max((len(r) for r in all_rows), default=0),
-            max(headers.values(), default=-1) + 1,
-        )
-        if row_i is not None:
-            hash_col = headers.get("#")
-            existing = all_rows[row_i - 1] if row_i - 1 < len(all_rows) else []
-            base = list(existing) + [""] * max(0, width - len(existing))
-            built = _build_row(width, headers, fields)
-            for j, val in enumerate(built):
-                if not val:
-                    continue
-                while len(base) <= j:
-                    base.append("")
-                if hash_col is not None and j == hash_col and base[j].strip():
-                    continue
-                base[j] = val
-            _write_row(results, row_i, base)
+        if row_i is None:
+            row_i = _next_append_row(all_rows, hidx, headers)
+            logger.info(
+                "Sheets Results appended uid=%s scores=%s",
+                uid,
+                {k: scores[k] for k in scores},
+            )
+        else:
             logger.info(
                 "Sheets Results updated row %s uid=%s scores=%s",
                 row_i,
                 uid,
                 {k: scores[k] for k in scores},
             )
-        else:
-            hash_col = headers.get("#")
-            next_no = _next_hash(all_rows, hidx, hash_col)
-            fields["#"] = next_no
-            r_row = _build_row(width, headers, fields)
-            _write_row(results, len(all_rows) + 1, r_row)
-            logger.info(
-                "Sheets Results appended uid=%s scores=%s",
-                uid,
-                {k: scores[k] for k in scores},
-            )
+        _write_fields(results, row_i, headers, fields)
     except Exception:
         logger.exception("Sheets on_result_saved failed")
 
