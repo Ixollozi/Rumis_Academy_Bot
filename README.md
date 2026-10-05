@@ -1,162 +1,177 @@
 # Rumis Academy — Telegram-бот Mock Test
 
-Бот записи на Main Test / Mock Test Speaking (online) по ТЗ Приложения №1 договора NST-001/2026.
+Инструкция для администратора и передачи проекта.  
+Бот: запись на Main Test, оплата вручную, результаты, пост-экзамен, Google Sheets.
 
-## Стек
+**Боевой бот:** `@CDI_Rumis_Bot`  
+**Код на сервере:** `/opt/rumis-bot`  
+**Договор:** NST-001/2026, Приложение № 1
 
-- Python 3.11+
-- aiogram 3
-- PostgreSQL + SQLAlchemy async
-- APScheduler (пост-экзамен через 2ч 50м)
-- openpyxl (выгрузка Excel)
-- опционально: Google Sheets (Students / Results / Session Log)
+---
 
-## Быстрый старт
+## 1. Что умеет бот
 
-### 1. База данных
+### Ученик
+1. `/start` → язык (UZ / RU / EN) → «Поделиться контактом» (ФИО на старте **не** спрашиваем)
+2. **Записаться** → ФИО латиницей + дата рождения → дата Main Test → слот (10:00 / 13:00 / 16:00) → подтверждение **без цены**
+3. Админ ставит цену → ученик платит по реквизитам → «Я оплатил» + фото/скрин чека
+4. Админ подтверждает оплату → ученику сообщение + **геолокация** центра
+5. Через **2 ч 50 мин** после слота — авто: контакт Speaking + канал результатов (или вручную из админки)
+6. Меню: Мои тесты · Результаты · Локация · Связаться с админом · Язык
 
-По умолчанию в `.env.example` — **SQLite** (`rumis_bot.db`), удобно для локальной разработки.
+### Админ (кнопка «Админ-панель»)
+- Даты Main Test + лимит мест (по умолчанию **10** оплаченных на дату)
+- Заявки: назначить цену / отклонить / подтвердить оплату
+- Цены по умолчанию 75 000 / 150 000 (настраиваются)
+- Результаты: отправить ученику, архив, повторная отправка
+- Пост-экзамен вручную + выбор Speaking-экзаменатора
+- Уведомления (всем / только оплатившим)
+- Админы: добавить / удалить по Telegram ID
+- Выгрузка Excel
 
-Для боя — PostgreSQL:
+Системных админов из `.env` (`ADMIN_IDS`) из панели удалить нельзя.
 
-```bash
-docker compose up -d
+---
+
+## 2. Ежедневная работа админа (кратко)
+
+1. **Даты** → добавить дату Main Test → при необходимости лимит и слоты → закрыть дату, если нужно  
+2. **Заявки** → «Нужна цена» → 75k / 150k или отклонить  
+3. Ученик жмёт «Я оплатил» и шлёт чек → **Заявки** / карточка в чат → **Оплачено** или отклонить  
+4. После теста → **Результаты** → выбрать ученика → вставить текст результата (лучше с баллами, см. ниже)  
+5. При необходимости → **Пост-экзамен** / **Уведомления** / **Excel**
+
+### Лимит мест
+В лимит входят только заявки со статусом **Оплачено**.  
+Когда лимит на дату набран, дата **пропадает** из выбора у учеников.  
+Лимит на дату можно менять в карточке даты.
+
+### Результаты в боте
+Текст результата уходит ученику в Telegram как есть.  
+Чтобы в Google Sheets заполнились колонки Listening / Reading / Writing / Speaking, в тексте должны быть баллы, например:
+
+```
+Listening - 6.5
+Reading - 7.0
+Writing - 6.5
+Speaking - 7.0
+Overall - 6.5
 ```
 
-И в `.env`:
+Подойдут и формы вроде `L: 6.5`, `Listening: 6.5`.  
+**Overall** и **Performance** в таблице считает сам лист формулами, бот их не затирает.
 
-```
-DATABASE_URL=postgresql+asyncpg://rumis:rumis@localhost:5432/rumis_bot
-```
+---
 
-### 2. Окружение
+## 3. Google Sheets
+
+Синхронизация с мастер-таблицей IELTS Coordinator (вкладки с эмодзи в названии).
+
+### Что пишет бот
+
+| Когда | Куда | Что |
+| --- | --- | --- |
+| Оплата подтверждена | **Students** | Student ID, ФИО, телефон, Telegram, Enrollment Date, Date of Birth |
+| Оплата подтверждена | **Session Log** | Date, Session, Student ID, Name, Payment `✅ Paid`, Bot Notified `✅ Sent` |
+| Оплата подтверждена | **Results** | Student ID, Test Date, Name/Surname (заготовка строки) |
+| Выбран Speaking-экзаменатор | **Session Log** | Speaking Teacher ID (обычно `@contact`) |
+| Отправлен результат | **Results** | Listening, Reading, Writing, Speaking (числами) |
+
+Новые строки пишутся в **первую свободную** после реальных данных (не в «хвост» на 500+ строке).
+
+### Что бот не заполняет (вручную / по процессу центра)
+- Session Log: PC, Test ID, Writing Teacher, Attendance  
+- Вкладки **Writing**, **Speaking**, **Release**, **Teachers**, **Test Bank**, **PC Checklist**  
+- Released? / Overall / Performance / № (#) — формулы листа
+
+### Настройка Sheets
+В `.env` на сервере:
+- `GOOGLE_SHEETS_ID` — id таблицы из URL  
+- `GOOGLE_CREDENTIALS_JSON` — путь к JSON service account  
+
+Таблицу нужно расшарить на email из JSON (`client_email`) с правом **Редактор**.  
+Без этих переменных бот работает как обычно, запись в Sheets просто пропускается.
+
+---
+
+## 4. Конфиг `.env` (важное)
+
+| Переменная | Зачем |
+| --- | --- |
+| `BOT_TOKEN` | Токен @BotFather |
+| `ADMIN_IDS` | Постоянные админы (Telegram user id, через запятую) |
+| `DATABASE_URL` | База (на VPS сейчас SQLite или Postgres, см. файл на сервере) |
+| `CENTER_NAME` / `CENTER_ADDRESS` / `CENTER_PHONE` | Локация |
+| `LOCATION_LAT` / `LOCATION_LON` / `MAPS_URL` | Точка на карте после оплаты |
+| `ADMIN_TELEGRAM` | Кнопка «Связаться с админом» |
+| `SPEAKING_CONTACT` | Контакты Speaking (если экзаменатор не выбран из списка) |
+| `MOCK_CHANNEL` | Канал результатов |
+| `PAYMENT_DETAILS` | Текст реквизитов ученику (`\n` = новая строка) |
+| `DEFAULT_PRICE_OWN` / `DEFAULT_PRICE_NEW` | 75000 / 150000 |
+| `DEFAULT_DATE_LIMIT` | Лимит мест на дату (10) |
+| `TIMEZONE` | `Asia/Tashkent` |
+| `BOT_USERNAME` | Username бота в пост-экзамен сообщениях |
+| `GOOGLE_SHEETS_ID` / `GOOGLE_CREDENTIALS_JSON` | Sheets (опционально) |
+
+Узнать свой Telegram ID: [@userinfobot](https://t.me/userinfobot).
+
+**Секреты (`.env`, токен, JSON Google) в публичный архив / GitHub не класть.**
+
+---
+
+## 5. Запуск локально (для разработки)
 
 ```bash
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
-
+# Windows: .venv\Scripts\activate
+# Linux:   source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env
-```
-
-Заполните `.env`:
-
-- `BOT_TOKEN` — токен от @BotFather
-- `ADMIN_IDS` — ваш Telegram user id (через запятую)
-- реквизиты, адрес, канал — можно позже
-
-Узнать свой id: напишите [@userinfobot](https://t.me/userinfobot).
-
-### 3. Таблицы
-
-При старте бот создаёт таблицы сам. Опционально:
-
-```bash
-alembic upgrade head
-```
-
-### 4. Запуск
-
-```bash
+cp .env.example .env   # заполнить BOT_TOKEN и ADMIN_IDS
 python -m app.bot
 ```
 
-## Сценарий ученика
+По умолчанию SQLite (`rumis_bot.db`). Таблицы создаются при старте.
 
-1. `/start` → язык → «Поделиться контактом» (**без ФИО**)
-2. Записаться → ФИО латиницей + ДР → дата → слот → подтверждение **без цены**
-3. Админ назначает 75k / 150k → оплата → «Я оплатил»
-4. Админ: Оплачено → слот в лимите даты
-5. Через **2ч 50м** после слота — 2 сообщения (Speaking + канал), либо вручную из админки
+Стек: Python 3.11+, aiogram 3, SQLAlchemy async, APScheduler, openpyxl, опционально gspread.
 
-## Админ-панель
+---
 
-Кнопка «Админ-панель» (только админы из БД / `ADMIN_IDS`):
+## 6. Сервер (VPS)
 
-- даты Main Test + лимит (по умолчанию 10)
-- заявки (цена / оплата)
-- цены 75k / 150k
-- результаты
-- ручной пост-экзамен
-- уведомления (рассылка зарегистрированным / оплатившим)
-- **админы** — добавить / удалить по Telegram ID (системных из `.env` удалить нельзя)
-- выгрузка Excel
+Путь: `/opt/rumis-bot`  
+Сервис: `rumis-bot` (systemd)
 
-`ADMIN_IDS` в `.env` — постоянные «владельцы» (не снимаются из панели). Остальных админов клиент крутит сам в боте.
+Полезные команды (SSH на VPS):
 
-## Чеклист приёмки
+```bash
+systemctl status rumis-bot
+journalctl -u rumis-bot -n 50 --no-pager
+systemctl restart rumis-bot
+```
 
-1. Первый запуск: язык + телефон, без ФИО  
-2. Полный цикл записи на UZ / RU / EN  
-3. Админ-панель: даты, лимит, заявки, цены, оплата, результаты, пост-экзамен, уведомления  
-4. Excel по полям ТЗ  
-5. Пост-экзамен авто 2:50 + ручная кнопка  
-6. Меню: Мои тесты, Результаты, Локация, Связаться  
-7. После N оплаченных на дату — дата скрыта  
-
-## Не входит
-
-Click/Payme, база учеников, OCR чеков, SMS, Mini App, 1С/CRM.
-
-## Деплой на VPS (только через Git)
-
-Код на сервер **не копируем** (`scp`/`rsync` запрещены). Локаль и VPS = один GitHub-репозиторий.
-
-1. Локально: commit → `git push origin main`
-2. На VPS:
+### Обновление кода (только через Git)
 
 ```bash
 cd /opt/rumis-bot
 bash deploy/deploy.sh
-# или вручную:
-# git pull --ff-only origin main
-# .venv/bin/pip install -r requirements.txt
-# systemctl restart rumis-bot
 ```
 
-Первичная установка (если каталога ещё нет):
+Скрипт делает `git pull`, ставит зависимости, перезапускает сервис.  
+На сервер **не** копировать код через scp/rsync поверх git.
 
-```bash
-git clone https://github.com/Ixollozi/Rumis_Academy_Bot.git /opt/rumis-bot
-cd /opt/rumis-bot
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env   # заполнить секреты; .env в git не попадает
-# положить SQLite/Postgres URL в DATABASE_URL
-systemctl enable --now rumis-bot
-```
+Не в git: `.env`, базы `*.db`, `.venv/`, `exports/`.
 
-Runtime **не в git**: `.env`, `*.db`, `.venv/`, `exports/`.
+---
 
-Пример systemd:
+## 7. Что не входит в проект
 
-```ini
-[Unit]
-Description=Rumis Academy Bot
-After=network.target
+Click / Payme, отдельная CRM учеников, OCR чеков, SMS, Mini App, синхронизация с 1С, оплата/администрирование VPS хостинга (VPS на стороне центра).
 
-[Service]
-WorkingDirectory=/opt/rumis-bot
-ExecStart=/opt/rumis-bot/.venv/bin/python -m app.bot
-Restart=always
-Environment=PYTHONUNBUFFERED=1
+---
 
-[Install]
-WantedBy=multi-user.target
-```
+## 8. После передачи
 
-## Инструкция администратору
+Исходный код, доступы админки и эта инструкция передаются после полной оплаты по договору.  
+Гарантия по Приложению № 1: **14 календарных дней** на воспроизводимые баги по ТЗ (не новые функции и не «поддержка всего»).
 
-1. Добавьте даты Main Test и слоты  
-2. Назначьте цену заявке или отклоните  
-3. После «Я оплатил» + чек — Оплачено / Отклонить  
-4. Результаты: «Ожидают» → отправка; обработанные — в «Архив»  
-5. При необходимости — «Уведомления»  
-6. Excel — «Выгрузка Excel»  
-
-## Google Sheets (опционально)
-
-Нужны `GOOGLE_SHEETS_ID` + `GOOGLE_CREDENTIALS_JSON` (путь к JSON service account) и доступ «Редактор» на email из `client_email`. Без ключа синхронизация просто пропускается.
+Вопросы по работе бота: этот README + админ-панель в Telegram.
